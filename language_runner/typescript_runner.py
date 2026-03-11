@@ -49,7 +49,7 @@ class TypeScriptTestRunner(BaseTestRunner):
 
             install_dir = str(package_json.parent)
             result = subprocess.run(
-                ["npm", "install"],
+                ["npm", "install", "--legacy-peer-deps"],
                 cwd=install_dir,
                 capture_output=True,
                 text=True,
@@ -81,7 +81,7 @@ class TypeScriptTestRunner(BaseTestRunner):
                 }
             # run npm install --save-dev ts-jest @types/jest
             ts_jest_result = subprocess.run(
-                ["npm", "install", "--save-dev", "ts-jest", "@types/jest"],
+                ["npm", "install", "--save-dev", "ts-jest", "@types/jest", "--legacy-peer-deps"],
                 cwd=install_dir,
                 capture_output=True,
                 text=True,
@@ -93,10 +93,36 @@ class TypeScriptTestRunner(BaseTestRunner):
                     "error": f"Failed to install ts-jest: {ts_jest_result.stderr}",
                     "output": ts_jest_result.stdout,
                 }
-            return {
+
+            # Ensure .codevalid Jest config exists (for running tests under .codevalid)
+            repo_root = Path(repo_path)
+            codevalid_dir = repo_root / ".codevalid"
+            codevalid_dir.mkdir(parents=True, exist_ok=True)
+
+            jest_config_names = ("jest.config.js", "jest.config.ts", "jest.config.cjs")
+            existing_config = next(
+                (codevalid_dir / name for name in jest_config_names if (codevalid_dir / name).exists()),
+                None,
+            )
+            files_to_commit: List[Dict[str, str]] = []
+
+            if existing_config is None:
+                sample_path = Path(__file__).parent / "utils" / "jest.config.codevalid.js"
+                target_config = codevalid_dir / "jest.config.js"
+                if sample_path.exists():
+                    config_content = sample_path.read_text()
+                    target_config.write_text(config_content)
+                    files_to_commit.append(".codevalid/jest.config.js")
+                else:
+                    raise Exception("Jest config sample not found")
+
+            result_payload: Dict[str, Any] = {
                 "success": True,
                 "output": "Environment setup completed successfully",
             }
+            if files_to_commit:
+                result_payload["files_to_commit"] = files_to_commit
+            return result_payload
 
         except subprocess.TimeoutExpired:
             return {
@@ -155,6 +181,10 @@ class TypeScriptTestRunner(BaseTestRunner):
             package_json = self._find_package_json(repo_path)
             cwd = str(package_json.parent) if package_json else repo_path
 
+            # Use .codevalid Jest config when present (for tests under .codevalid)
+            codevalid_config = Path(repo_path) / ".codevalid" / "jest.config.js"
+            use_codevalid_config = codevalid_config.exists()
+
             # Run Jest with JSON output to a temp file for reliable parsing
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".json", delete=False
@@ -164,20 +194,23 @@ class TypeScriptTestRunner(BaseTestRunner):
             try:
                 cmd = [
                     "npx",
+                    "--yes",
                     "jest",
                     "--json",
                     f"--outputFile={output_file}",
                     "--no-cache",
-                    # "--passWithNoTests",
                     "--runTestsByPath",
                     *existing_test_files,
-                    "--preset=ts-jest",
-                    "--testMatch '**/*.ts'",
                 ]
+                if use_codevalid_config:
+                    cmd.extend(["--config", str(codevalid_config.resolve())])
+                else:
+                    cmd.extend(["--preset=ts-jest"])
 
                 result = subprocess.run(
                     cmd,
                     cwd=cwd,
+                    input="y\n",
                     capture_output=True,
                     text=True,
                     timeout=1800,  # 30 minutes
