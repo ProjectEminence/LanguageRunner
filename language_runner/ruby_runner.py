@@ -20,54 +20,76 @@ class RubyTestRunner(BaseTestRunner):
     
     def setup_environment(self, repo_path: str) -> Dict[str, Any]:
         """
-        Setup Ruby environment: run bundle install.
-        
+        Setup Ruby environment: run bundle install and ensure .codevalid/tests/test_helper.rb exists.
+
         Args:
             repo_path: Path to the repository root
-            
+
         Returns:
-            Dictionary with setup results
+            Dictionary with setup results (optionally files_to_commit)
         """
         try:
             repo_path_obj = Path(repo_path)
             gemfile = repo_path_obj / "Gemfile"
-            
+
             if not gemfile.exists():
                 return {
                     "success": False,
-                    "error": "Gemfile not found"
+                    "error": "Gemfile not found",
+                    "output": "",
                 }
-            
+
             # Run bundle install
             result = subprocess.run(
                 ["bundle", "install"],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=600  # 10 minutes timeout
+                timeout=600,  # 10 minutes timeout
             )
-            
+
             if result.returncode != 0:
                 return {
                     "success": False,
                     "error": f"Failed to run bundle install: {result.stderr}",
-                    "output": result.stdout
+                    "output": result.stdout,
                 }
-            
-            return {
+
+            # Ensure .codevalid/tests and test_helper.rb exist (for running tests under .codevalid)
+            repo_root = Path(repo_path)
+            codevalid_tests_dir = repo_root / ".codevalid" / "tests"
+            codevalid_tests_dir.mkdir(parents=True, exist_ok=True)
+            files_to_commit: List[str] = []
+
+            test_helper_path = codevalid_tests_dir / "test_helper.rb"
+            if not test_helper_path.exists():
+                sample_path = Path(__file__).parent / "utils" / "test_helper.codevalid.rb"
+                if sample_path.exists():
+                    config_content = sample_path.read_text()
+                    test_helper_path.write_text(config_content)
+                    files_to_commit.append(".codevalid/tests/test_helper.rb")
+                else:
+                    raise Exception("Ruby test_helper config sample not found")
+
+            result_payload: Dict[str, Any] = {
                 "success": True,
-                "output": "Environment setup completed successfully"
+                "output": "Environment setup completed successfully",
             }
-            
+            if files_to_commit:
+                result_payload["files_to_commit"] = files_to_commit
+            return result_payload
+
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
-                "error": "Setup timed out"
+                "error": "Setup timed out",
+                "output": "",
             }
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Setup failed: {str(e)}"
+                "error": f"Setup failed: {str(e)}",
+                "output": "",
             }
     
     def run_tests(self, repo_path: str, test_files: List[str]) -> Dict[str, Any]:
@@ -95,19 +117,21 @@ class RubyTestRunner(BaseTestRunner):
                     "errors": ["No test files found"]
                 }
             
-            # Run Rails tests
-            # Rails test command: bundle exec rails test <test_files>
+            # Run Rails tests with RAILS_ENV=test and RUBYLIB so .codevalid/tests/test_helper.rb is used
             cmd = [
+                "env",
+                "RAILS_ENV=test",
+                "RUBYLIB=.codevalid/tests",
                 "bundle", "exec", "rails", "test",
-                *existing_test_files
+                *existing_test_files,
             ]
-            
+
             result = subprocess.run(
                 cmd,
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
-                timeout=1800  # 30 minutes timeout
+                timeout=1800,  # 30 minutes timeout
             )
             
             # Parse Rails test output
@@ -139,12 +163,6 @@ class RubyTestRunner(BaseTestRunner):
                         "output": ""
                     })
                     current_test = len(test_results) - 1
-                elif current_test is not None and line.strip() and test_results[current_test]["status"] == "failed":
-                    # Append error details to current test
-                    if test_results[current_test]["error"]:
-                        test_results[current_test]["error"] += "\n" + line
-                    else:
-                        test_results[current_test]["error"] = line
             
             # If no structured results, create summary from return code
             if not test_results:
