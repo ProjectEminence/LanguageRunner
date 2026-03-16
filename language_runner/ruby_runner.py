@@ -1,6 +1,7 @@
 """
 Ruby on Rails test runner using bundle and rails test.
 """
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List
@@ -20,7 +21,7 @@ class RubyTestRunner(BaseTestRunner):
     
     def setup_environment(self, repo_path: str) -> Dict[str, Any]:
         """
-        Setup Ruby environment: run bundle install and ensure .codevalid/tests/test_helper.rb exists.
+        Setup Ruby environment: run bundle install, rails db:migrate (RAILS_ENV=test), and ensure .codevalid/tests/test_helper.rb exists.
 
         Args:
             repo_path: Path to the repository root
@@ -53,6 +54,23 @@ class RubyTestRunner(BaseTestRunner):
                     "success": False,
                     "error": f"Failed to run bundle install: {result.stderr}",
                     "output": result.stdout,
+                }
+
+            # Run Rails DB migrations for test environment
+            migrate_env = {**os.environ, "RAILS_ENV": "test"}
+            migrate_result = subprocess.run(
+                ["bundle", "exec", "rails", "db:migrate"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutes timeout
+                env=migrate_env,
+            )
+            if migrate_result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"Failed to run rails db:migrate: {migrate_result.stderr}",
+                    "output": migrate_result.stdout,
                 }
 
             # Ensure .codevalid/tests and test_helper.rb exist (for running tests under .codevalid)

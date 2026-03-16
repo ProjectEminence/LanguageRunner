@@ -49,7 +49,13 @@ class TypeScriptTestRunner(BaseTestRunner):
 
             install_dir = str(package_json.parent)
             result = subprocess.run(
-                ["npm", "install", "--legacy-peer-deps"],
+                [
+                    "npm",
+                    "install",
+                    "--legacy-peer-deps",
+                    "identity-obj-proxy",
+                    "@testing-library/react",
+                ],
                 cwd=install_dir,
                 capture_output=True,
                 text=True,
@@ -115,6 +121,31 @@ class TypeScriptTestRunner(BaseTestRunner):
                     files_to_commit.append(".codevalid/jest.config.js")
                 else:
                     raise Exception("Jest config sample not found")
+
+            # Ensure jest.setup.js exists in .codevalid (referenced by jest.config)
+            setup_target = codevalid_dir / "jest.setup.js"
+            if not setup_target.exists():
+                setup_sample = Path(__file__).parent / "utils" / "jest.setup.codevalid.js"
+                if setup_sample.exists():
+                    setup_target.write_text(setup_sample.read_text())
+                    files_to_commit.append(".codevalid/jest.setup.js")
+                else:
+                    raise Exception("Jest setup sample not found")
+
+            # Ensure .codevalid/mocks and mock files exist (referenced by jest.config)
+            mocks_dir = codevalid_dir / "mocks"
+            mocks_dir.mkdir(parents=True, exist_ok=True)
+            mock_files = ("fileMock.js", "styleMock.js", "highchartsModuleMock.js")
+            utils_mocks = Path(__file__).parent / "utils" / "mocks"
+            for name in mock_files:
+                target_mock = mocks_dir / name
+                if not target_mock.exists():
+                    source_mock = utils_mocks / name
+                    if source_mock.exists():
+                        target_mock.write_text(source_mock.read_text())
+                        files_to_commit.append(f".codevalid/mocks/{name}")
+                    else:
+                        raise Exception(f"Mock file sample not found: {name}")
 
             result_payload: Dict[str, Any] = {
                 "success": True,
@@ -198,6 +229,7 @@ class TypeScriptTestRunner(BaseTestRunner):
                     "jest",
                     "--json",
                     f"--outputFile={output_file}",
+                    "--rootDir=.",
                     "--no-cache",
                     "--runTestsByPath",
                     *existing_test_files,
