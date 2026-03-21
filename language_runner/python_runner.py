@@ -1,13 +1,15 @@
 """
-Python test runner using pytest.
+Python test runner using pytest with coverage support via pytest-cov.
 """
+import json
 import subprocess
 import sys
 import os
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from datetime import datetime
 
 from .base_runner import BaseTestRunner
 
@@ -59,6 +61,43 @@ def _parse_junit_xml(junit_path: Path) -> List[Dict[str, Any]]:
             "output": output or "",
         })
     return results
+
+
+def _parse_coverage_json(coverage_path: Path) -> Optional[Dict[str, Any]]:
+    """Parse pytest-cov JSON coverage report into standardized format."""
+    if not coverage_path.exists() or coverage_path.stat().st_size == 0:
+        return None
+    try:
+        with open(coverage_path, 'r') as f:
+            data = json.load(f)
+        
+        # Extract coverage totals
+        totals = data.get('totals', {})
+        line_pct = totals.get('percent_covered', 0)
+        lines_covered = totals.get('covered_lines', 0)
+        lines_total = totals.get('num_statements', 0)
+        
+        # Per-file coverage
+        files_covered = []
+        for file_path, file_data in data.get('files', {}).items():
+            file_totals = file_data.get('totals', {})
+            files_covered.append({
+                'file': file_path,
+                'line_coverage': file_totals.get('percent_covered', 0),
+                'lines_covered': file_totals.get('covered_lines', 0),
+                'lines_total': file_totals.get('num_statements', 0),
+            })
+        
+        return {
+            'line_coverage': line_pct,
+            'lines_covered': lines_covered,
+            'lines_total': lines_total,
+            'files_covered': len(files_covered),
+            'coverage_by_file': files_covered,
+            'generated_at': datetime.utcnow().isoformat() + 'Z',
+        }
+    except (json.JSONDecodeError, OSError, KeyError):
+        return None
 
 
 
@@ -173,6 +212,21 @@ class PythonTestRunner(BaseTestRunner):
                     "output": pytest_result.stdout,
                 }
 
+            # Ensure pytest-cov is installed for coverage support
+            cov_result = subprocess.run(
+                [str(pip_exe), "install", "pytest-cov"],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutes timeout
+            )
+            if cov_result.returncode != 0:
+                return {
+                    "success": False,
+                    "error": f"Failed to install pytest-cov: {cov_result.stderr}",
+                    "output": cov_result.stdout,
+                }
+
             return {
                 "success": True,
                 "output": "Environment setup completed successfully",
@@ -189,7 +243,12 @@ class PythonTestRunner(BaseTestRunner):
                 "error": f"Setup failed: {str(e)}"
             }
     
-    def run_tests(self, repo_path: str, test_files: List[str]) -> Dict[str, Any]:
+    def run_tests(
+        self,
+        repo_path: str,
+        test_files: List[str],
+        include_coverage: bool = False
+    ) -> Dict[str, Any]:
         """
         Run pytest on the given test files using the repo's .venv Python.
         
@@ -198,9 +257,10 @@ class PythonTestRunner(BaseTestRunner):
         Args:
             repo_path: Path to the repository root
             test_files: List of test file paths (relative to repo_path)
-            
+            include_coverage: Whether to collect and return coverage data (default: False)
+        
         Returns:
-            Dictionary with test results
+            Dictionary with test results. If include_coverage=True, also includes coverage data.
         """
         try:
             repo = Path(repo_path)
@@ -209,6 +269,7 @@ class PythonTestRunner(BaseTestRunner):
                 return {
                     "success": False,
                     "test_results": [],
+                    "coverage": None,
                     "errors": ["No .venv found in repo; run setup_environment first."],
                 }
 
@@ -217,6 +278,7 @@ class PythonTestRunner(BaseTestRunner):
                 return {
                     "success": False,
                     "test_results": [],
+                    "coverage": None,
                     "errors": [
                         "No Python test files (.py) to run. "
                         "Received paths may be for another language (e.g. .ts)."
@@ -227,6 +289,7 @@ class PythonTestRunner(BaseTestRunner):
                 return {
                     "success": False,
                     "test_results": [],
+                    "coverage": None,
                     "errors": ["No test files found"],
                 }
 
@@ -241,6 +304,15 @@ class PythonTestRunner(BaseTestRunner):
                 suffix=".xml", delete=False, prefix="pytest_junit_"
             ) as f:
                 junit_path = Path(f.name)
+            
+            # Also create temp file for coverage if needed
+            coverage_json_path = None
+            if include_coverage:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".json", delete=False, prefix="pytest_cov_"
+                ) as f:
+                    coverage_json_path = Path(f.name)
+            
             try:
                 cmd = [
                     str(venv_python),
@@ -249,6 +321,153 @@ class PythonTestRunner(BaseTestRunner):
                     *existing_test_files,
                     "-v",
                     f"--junitxml={junit_path}",
+                ]
+                
+                # Add coverage flags if requested
+                if include_coverage and coverage_json_path:
+                    cmd.extend([
+                        f"--cov={repo_path}",
+                        f"--cov-report=json:{coverage_json_path}",
+                        "--cov-report=term-missing",
+                    ])
+                
+                result = subprocess.run(
+                    cmd,
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                exit_code = result.returncode
+                stdout = result.stdout or ""
+                stderr = result.stderr or ""
+
+                if junit_path.exists():
+                    test_results = _parse_junit_xml(junit_path)
+                else:
+                    test_results = []
+
+                # Parse coverage data if requested
+                coverage = None
+                if include_coverage and coverage_json_path and coverage_json_path.exists():
+                    coverage = _parse_coverage_json(coverage_json_path)
+
+                errors: List[str] = []
+                if exit_code != 0 and not any(r["status"] == "failed" for r in test_results):
+                    if stderr or stdout:
+                        errors.append("\n---\n".join(p for p in (stderr.strip(), stdout.strip()) if p))
+                    else:
+                        errors.append(f"pytest exited with code {exit_code}; no individual test results captured.")
+
+                return {
+                    "success": exit_code == 0,
+                    "test_results": test_results,
+                    "coverage": coverage,
+                    "errors": errors,
+                }
+            finally:
+                junit_path.unlink(missing_ok=True)
+                if coverage_json_path:
+                    coverage_json_path.unlink(missing_ok=True)
+
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "test_results": [],
+                "coverage": None,
+                "errors": ["Test execution timed out"],
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "test_results": [],
+                "coverage": None,
+                "errors": [f"Failed to run tests: {str(e)}"],
+            }
+
+    def run_tests_with_coverage(
+        self,
+        repo_path: str,
+        test_files: List[str],
+        coverage_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Run pytest with coverage on the given test files using the repo's .venv Python.
+        
+        Only runs Python (.py) test files. Non-Python paths are ignored.
+        
+        Args:
+            repo_path: Path to the repository root
+            test_files: List of test file paths (relative to repo_path)
+            coverage_options: Optional dict with keys:
+                - source: source directory to measure coverage (default: repo_path)
+                - report_format: 'json' or 'xml' (default: 'json')
+        
+        Returns:
+            Dictionary with test results and coverage data
+        """
+        coverage_options = coverage_options or {}
+        source_dir = coverage_options.get('source', repo_path)
+        
+        try:
+            repo = Path(repo_path)
+            venv_python = self._venv_python(repo_path)
+            if not venv_python.exists():
+                return {
+                    "success": False,
+                    "test_results": [],
+                    "coverage": None,
+                    "errors": ["No .venv found in repo; run setup_environment first."],
+                }
+
+            python_test_files = [f for f in test_files if f.lower().endswith(".py")]
+            if not python_test_files:
+                return {
+                    "success": False,
+                    "test_results": [],
+                    "coverage": None,
+                    "errors": [
+                        "No Python test files (.py) to run. "
+                        "Received paths may be for another language (e.g. .ts)."
+                    ],
+                }
+            existing_test_files = [f for f in python_test_files if (repo / f).exists()]
+            if not existing_test_files:
+                return {
+                    "success": False,
+                    "test_results": [],
+                    "coverage": None,
+                    "errors": ["No test files found"],
+                }
+
+            # Ensure conftest.py exists so repo root is on path when subprocess runs
+            conftest_path = repo / "conftest.py"
+            if not conftest_path.exists():
+                conftest_path.write_text(
+                    "import sys, os\nsys.path.insert(0, os.path.dirname(__file__))\n"
+                )
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".xml", delete=False, prefix="pytest_junit_"
+            ) as f:
+                junit_path = Path(f.name)
+            
+            with tempfile.NamedTemporaryFile(
+                suffix=".json", delete=False, prefix="pytest_cov_"
+            ) as f:
+                coverage_json_path = Path(f.name)
+            
+            try:
+                cmd = [
+                    str(venv_python),
+                    "-m",
+                    "pytest",
+                    *existing_test_files,
+                    "-v",
+                    f"--junitxml={junit_path}",
+                    f"--cov={source_dir}",
+                    f"--cov-report=json:{coverage_json_path}",
+                    "--cov-report=term-missing",
                 ]
                 result = subprocess.run(
                     cmd,
@@ -266,6 +485,9 @@ class PythonTestRunner(BaseTestRunner):
                 else:
                     test_results = []
 
+                # Parse coverage data
+                coverage = _parse_coverage_json(coverage_json_path)
+
                 errors: List[str] = []
                 if exit_code != 0 and not any(r["status"] == "failed" for r in test_results):
                     if stderr or stdout:
@@ -276,20 +498,24 @@ class PythonTestRunner(BaseTestRunner):
                 return {
                     "success": exit_code == 0,
                     "test_results": test_results,
+                    "coverage": coverage,
                     "errors": errors,
                 }
             finally:
                 junit_path.unlink(missing_ok=True)
+                coverage_json_path.unlink(missing_ok=True)
 
         except subprocess.TimeoutExpired:
             return {
                 "success": False,
                 "test_results": [],
+                "coverage": None,
                 "errors": ["Test execution timed out"],
             }
         except Exception as e:
             return {
                 "success": False,
                 "test_results": [],
-                "errors": [f"Failed to run tests: {str(e)}"],
+                "coverage": None,
+                "errors": [f"Failed to run tests with coverage: {str(e)}"],
             }
