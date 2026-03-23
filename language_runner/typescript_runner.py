@@ -136,7 +136,7 @@ class TypeScriptTestRunner(BaseTestRunner):
             mocks_dir = codevalid_dir / "mocks"
             mocks_dir.mkdir(parents=True, exist_ok=True)
             mock_files = ("fileMock.js", "styleMock.js", "highchartsModuleMock.js")
-            utils_mocks = Path(__file__).parent / "utils" / "mocks"
+            utils_mocks = Path(__file__) / "utils" / "mocks"
             for name in mock_files:
                 target_mock = mocks_dir / name
                 if not target_mock.exists():
@@ -145,7 +145,7 @@ class TypeScriptTestRunner(BaseTestRunner):
                         target_mock.write_text(source_mock.read_text())
                         files_to_commit.append(f".codevalid/mocks/{name}")
                     else:
-                        raise Exception(f"Mock file sample not found: {name}")
+                        raise Exception(f"Mock file sample not found: {name} in {utils_mocks}")
 
             result_payload: Dict[str, Any] = {
                 "success": True,
