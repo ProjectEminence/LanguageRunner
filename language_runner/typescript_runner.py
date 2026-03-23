@@ -145,7 +145,7 @@ class TypeScriptTestRunner(BaseTestRunner):
                         target_mock.write_text(source_mock.read_text())
                         files_to_commit.append(f".codevalid/mocks/{name}")
                     else:
-                        raise Exception(f"Mock file sample not found: {name} in {utils_mocks}")
+                        print(f"ERROR==> Mock file sample not found: {name} in {utils_mocks}")
 
             result_payload: Dict[str, Any] = {
                 "success": True,
