@@ -2,6 +2,7 @@
 Python test runner using pytest with coverage support via pytest-cov.
 """
 import json
+import logging
 import subprocess
 import sys
 import os
@@ -12,6 +13,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from .base_runner import BaseTestRunner
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_junit_xml(junit_path: Path) -> List[Dict[str, Any]]:
@@ -65,7 +68,13 @@ def _parse_junit_xml(junit_path: Path) -> List[Dict[str, Any]]:
 
 def _parse_coverage_json(coverage_path: Path) -> Optional[Dict[str, Any]]:
     """Parse pytest-cov JSON coverage report into standardized format."""
-    if not coverage_path.exists() or coverage_path.stat().st_size == 0:
+    if not coverage_path.exists():
+        import sys
+        print(f"[DEBUG] _parse_coverage_json: file does not exist: {coverage_path}", file=sys.stderr)
+        return None
+    if coverage_path.stat().st_size == 0:
+        import sys
+        print(f"[DEBUG] _parse_coverage_json: file is empty: {coverage_path}", file=sys.stderr)
         return None
     try:
         with open(coverage_path, 'r') as f:
@@ -73,9 +82,12 @@ def _parse_coverage_json(coverage_path: Path) -> Optional[Dict[str, Any]]:
         
         # Extract coverage totals
         totals = data.get('totals', {})
+        import sys
+        print(f"[DEBUG] _parse_coverage_json: totals keys: {list(totals.keys())}", file=sys.stderr)
         line_pct = totals.get('percent_covered', 0)
         lines_covered = totals.get('covered_lines', 0)
         lines_total = totals.get('num_statements', 0)
+        print(f"[DEBUG] _parse_coverage_json: line_pct={line_pct}, lines_covered={lines_covered}, lines_total={lines_total}", file=sys.stderr)
         
         # Per-file coverage
         files_covered = []
@@ -182,24 +194,25 @@ class PythonTestRunner(BaseTestRunner):
             requirements_files = self._find_requirements_files(repo_path)
 
             # Install from each requirements.txt (root first, then subdirs) using venv pip
+            # Continue even if requirements installation fails - we need pytest installed regardless
             for requirements_file in requirements_files:
                 result = subprocess.run(
-                    [str(pip_exe), "install", "-r", str(requirements_file)],
+                    [str(pip_exe), "install", "-r", str(requirements_file), "--ignore-installed"],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
                     timeout=600,  # 10 minutes timeout
                 )
+                # Log but don't fail - we need pytest even if requirements fail
                 if result.returncode != 0:
-                    return {
-                        "success": False,
-                        "error": f"Failed to install requirements from {requirements_file}: {result.stderr}",
-                        "output": result.stdout,
-                    }
+                    logger.warning(
+                        f"Failed to install requirements from {requirements_file}: {result.stderr}. "
+                        "Continuing anyway - will try to install pytest directly."
+                    )
 
-            # Ensure pytest is installed in the venv
+            # Ensure pytest is installed in the venv (CRITICAL - must succeed)
             pytest_result = subprocess.run(
-                [str(pip_exe), "install", "pytest"],
+                [str(pip_exe), "install", "pytest", "--ignore-installed"],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -431,6 +444,11 @@ class PythonTestRunner(BaseTestRunner):
                         "Received paths may be for another language (e.g. .ts)."
                     ],
                 }
+
+            # DEBUG: Check if venv exists
+            import sys
+            print(f"[DEBUG] Python run_tests_with_coverage: venv_python exists: {venv_python.exists()}", file=sys.stderr)
+
             existing_test_files = [f for f in python_test_files if (repo / f).exists()]
             if not existing_test_files:
                 return {
@@ -479,6 +497,17 @@ class PythonTestRunner(BaseTestRunner):
                 exit_code = result.returncode
                 stdout = result.stdout or ""
                 stderr = result.stderr or ""
+
+                import sys
+                print(f"[DEBUG] run_tests_with_coverage: exit_code={exit_code}", file=sys.stderr)
+                print(f"[DEBUG] run_tests_with_coverage: stdout length={len(stdout)}", file=sys.stderr)
+                print(f"[DEBUG] run_tests_with_coverage: stderr length={len(stderr)}", file=sys.stderr)
+                if stdout:
+                    print(f"[DEBUG] run_tests_with_coverage: stdout first 500 chars: {stdout[:500]}", file=sys.stderr)
+                if stderr:
+                    print(f"[DEBUG] run_tests_with_coverage: stderr first 500 chars: {stderr[:500]}", file=sys.stderr)
+                print(f"[DEBUG] run_tests_with_coverage: coverage_json_path exists before parse: {coverage_json_path.exists()}", file=sys.stderr)
+                print(f"[DEBUG] run_tests_with_coverage: coverage_json_path size: {coverage_json_path.stat().st_size if coverage_json_path.exists() else 'N/A'}", file=sys.stderr)
 
                 if junit_path.exists():
                     test_results = _parse_junit_xml(junit_path)
